@@ -50,6 +50,7 @@ class FitnessDataset(Dataset):
             sequence.append(flat_pose)
 
         sequence = np.array(sequence, dtype=np.float32)
+        sequence = normalize_pose(sequence)
             
 
         if self.augment:
@@ -112,6 +113,21 @@ class RandomTransform:
             sequence = time_warp(sequence, rate=random.uniform(0.8, 1.2))
         return sequence
     
+#####################
+# Pose Normalization
+#####################
+def normalize_pose(sequence):
+    sequence = np.array(sequence, dtype=np.float32)
+    sequence = sequence.reshape(sequence.shape[0], 33, 4)
+
+    center = sequence[:, 23, :3]  # use point 23 (mid-hip) as center
+    sequence[:, :, :3] -= center[:, np.newaxis, :]
+
+    scale = np.linalg.norm(sequence[:, 11, :2] - sequence[:, 23, :2], axis=1, keepdims=True)
+    scale = np.clip(scale, a_min=1e-5, a_max=None)
+    sequence[:, :, :2] /= scale[:, np.newaxis]
+
+    return sequence.reshape(sequence.shape[0], -1)
 
 #####################
 # DataLoader Preparation
