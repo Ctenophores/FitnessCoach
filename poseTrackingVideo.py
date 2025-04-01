@@ -26,7 +26,7 @@ def process_frame(frame, holistic, hands, mpDraw):
 
     return frame, frame_data
 
-def video_to_skeleton(video_dir='videos', output_dir='video_skeleton_data', output_video_dir='skeleton_videos'):
+def video_to_skeleton(video_dir='AItrainerdataset\BodyWeightSquats', output_dir='video_skeleton_data', output_video_dir='skeleton_videos'):
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(output_video_dir, exist_ok=True)
 
@@ -118,5 +118,9 @@ if __name__ == "__main__":
     if isCap:
         capture_realtime_skeleton()
     else:
-        video_to_skeleton()
+        video_to_skeleton(video_dir='AItrainerdataset\BodyWeightSquats', output_dir= 'skeleton_data\BodyWeightSquats', output_video_dir='skeleton_videos\BodyWeightSquats')
+        video_to_skeleton(video_dir='AItrainerdataset\PushUps', output_dir= 'skeleton_data\PushUps', output_video_dir='skeleton_videos\PushUps')
+        video_to_skeleton(video_dir='AItrainerdataset\JumpingJack', output_dir= 'skeleton_data\JumpingJacks', output_video_dir='skeleton_videos\JumpingJacks')
+        
+
         
