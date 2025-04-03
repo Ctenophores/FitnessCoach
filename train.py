@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -35,6 +36,7 @@ def main():
     # Training loop
     epochs = 1000
     train_losses = []
+    val_losses = []
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
@@ -82,17 +84,61 @@ def main():
         train_losses.append(avg_loss)
         print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}")
 
-        if (epoch) % save_freq == 0:
+        if (epoch+1) % save_freq == 0:
+            avg_val_loss, acc, mae, rmse, int_acc = evaluate(
+                model, val_loader, adj, in_features, device, criterion, criterion_rep
+            )
+            val_losses.append(avg_val_loss)
+            print(f"Epoch {epoch+1}/{epochs} "
+                  f"Val Loss: {avg_val_loss:.4f} | Val Acc: {acc:.2f}% | "
+                  f"Rep MAE: {mae:.2f}, RMSE: {rmse:.2f}, Int Acc: {int_acc*100:.2f}%")
             plot_loss(train_losses)
             save_path = f"checkpoints/model_epoch_{epoch+1}.pt"
             os.makedirs("checkpoints", exist_ok=True)
             torch.save(model.state_dict(), save_path)
             print(f"Saved model to {save_path}")
 
-
-
     
     # You could do a val loop, etc.
+def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_rep):
+    model.eval()
+    val_loss = 0.0
+    correct = 0
+    total = 0
+    rep_preds_all = []
+    rep_trues_all = []
+
+    with torch.no_grad():
+        for packed_input, (action_labels, rep_counts) in val_loader:
+            action_labels = action_labels.to(device)
+            rep_counts = rep_counts.to(device)
+            padded, lengths = torch.nn.utils.rnn.pad_packed_sequence(packed_input, batch_first=True)
+            B, T, F = padded.shape
+            padded = padded.view(B, T, 33, in_features).to(device)
+
+            action_logits, rep_count_pred = model(padded, adj)
+            loss_action = criterion(action_logits, action_labels)
+            loss_rep = criterion_rep(rep_count_pred, rep_counts)
+            loss = loss_action + loss_rep
+
+            val_loss += loss.item() * B
+            total += B
+            pred_labels = torch.argmax(action_logits, dim=1)
+            correct += (pred_labels == action_labels).sum().item()
+
+            rep_preds_all.extend(rep_count_pred.squeeze().cpu().numpy())
+            rep_trues_all.extend(rep_counts.cpu().numpy())
+
+    avg_val_loss = val_loss / total
+    accuracy = correct / total * 100
+    rep_preds_all = np.array(rep_preds_all)
+    rep_trues_all = np.array(rep_trues_all)
+    mae = np.mean(np.abs(rep_preds_all - rep_trues_all))
+    rmse = np.sqrt(np.mean((rep_preds_all - rep_trues_all) ** 2))
+    int_acc = np.mean(np.round(rep_preds_all) == rep_trues_all)
+
+    return avg_val_loss, accuracy, mae, rmse, int_acc
+
 
 def plot_loss(train_losses, save_path="loss_curve.png"):
     plt.clf() 
