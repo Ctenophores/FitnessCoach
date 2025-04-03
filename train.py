@@ -16,7 +16,7 @@ def main():
     gcn_hidden = 32
     lstm_hidden = 64
     num_classes = 3      # e.g. squat=0, pushup=1, lunge=2, etc.
-    save_freq = 20
+    save_freq = 100
 
     # Initialize model
     model = GNNBiLSTMModel(in_features, gcn_hidden, lstm_hidden, num_classes).to(device)
