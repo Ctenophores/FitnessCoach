@@ -160,6 +160,8 @@ class RandomTransform:
             sequence = horizontal_flip(sequence)
         if random.random() < 0.3:
             sequence = time_warp(sequence, rate=random.uniform(0.8, 1.2))
+        if random.random() < 0.3:
+            sequence = rotate_around_y(sequence)
         return sequence
     
 #####################

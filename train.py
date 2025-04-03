@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -5,6 +6,7 @@ import torch.optim as optim
 from dataset import get_dataloaders, collate_fn
 
 from model import GNNBiLSTMModel, build_mediapipe_adjacency
+import matplotlib.pyplot as plt
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -14,6 +16,7 @@ def main():
     gcn_hidden = 32
     lstm_hidden = 64
     num_classes = 3      # e.g. squat=0, pushup=1, lunge=2, etc.
+    save_freq = 20
 
     # Initialize model
     model = GNNBiLSTMModel(in_features, gcn_hidden, lstm_hidden, num_classes).to(device)
@@ -30,7 +33,8 @@ def main():
     train_loader, val_loader = get_dataloaders(data_root='split_data', batch_size=8)
     
     # Training loop
-    epochs = 200
+    epochs = 1000
+    train_losses = []
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
@@ -64,20 +68,42 @@ def main():
             alpha = 1.0
             loss_action = criterion(final_action_logits, action_labels)
             loss_rep = criterion_rep(final_rep_count_pred, rep_counts)
-            total_loss = loss_action + alpha * loss_rep
+            loss = loss_action + alpha * loss_rep
             
             optimizer.zero_grad()
-            total_loss.backward()
+            loss.backward()
             optimizer.step()
             
             batch_size = B
-            total_loss += total_loss.item() * batch_size
+            total_loss += loss.item() * batch_size
             total_samples += batch_size
         
         avg_loss = total_loss / total_samples
+        train_losses.append(avg_loss)
         print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}")
+
+        if (epoch) % save_freq == 0:
+            plot_loss(train_losses)
+            save_path = f"checkpoints/model_epoch_{epoch+1}.pt"
+            os.makedirs("checkpoints", exist_ok=True)
+            torch.save(model.state_dict(), save_path)
+            print(f"Saved model to {save_path}")
+
+
+
     
     # You could do a val loop, etc.
+
+def plot_loss(train_losses, save_path="loss_curve.png"):
+    plt.clf() 
+    plt.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training Loss Curve")
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(save_path)
+    print(f"Saved loss curve to {save_path}")
 
 if __name__ == "__main__":
     main()

@@ -47,6 +47,10 @@ class GCNLayer(nn.Module):
     def __init__(self, in_features, out_features):
         super().__init__()
         self.linear = nn.Linear(in_features, out_features)
+        self.match_dim = (
+            nn.Linear(in_features, out_features)
+            if in_features != out_features else None
+        )
     
     def forward(self, x, adj):
         # Summation of neighbor features:
@@ -55,6 +59,13 @@ class GCNLayer(nn.Module):
         neighbor_sum = neighbor_sum.permute(0, 2, 1)  # => [B, J, in_features]
         
         out = self.linear(neighbor_sum)
+
+        #### Add Residual
+        residual = x
+        if self.match_dim:
+            residual = self.match_dim(x)
+        out = out + residual
+
         out = F.relu(out)
         return out
 
@@ -72,13 +83,17 @@ class GNNBiLSTMModel(nn.Module):
             input_size=gcn_hidden,
             hidden_size=lstm_hidden,
             batch_first=True,
-            bidirectional=True
+            bidirectional=True,
+            num_layers=2,
+            dropout=0.3
         )
         
         # Classifier for frame-level predictions
-        self.classifier = nn.Linear(2 * lstm_hidden, num_actions)
+        # self.classifier = nn.Linear(2 * lstm_hidden, num_actions)
 
-        self.regressor = nn.Linear(2*lstm_hidden, 1)
+        # self.regressor = nn.Linear(2*lstm_hidden, 1)
+        self.classifier = nn.Linear(4 * lstm_hidden, num_actions)
+        self.regressor = nn.Linear(4 * lstm_hidden, 1)
     
     def forward(self, x, adj):
         B, T, J, F = x.shape
@@ -100,7 +115,12 @@ class GNNBiLSTMModel(nn.Module):
         lstm_out, _ = self.lstm(out)
         
         # 6) Use final time step => [B, 2*lstm_hidden]
-        final_feat = lstm_out[:, -1, :]
+        # final_feat = lstm_out[:, -1, :]
+
+        # 同时使用最后一帧和平均帧
+        final_mean = lstm_out.mean(dim=1)      # [B, 2*lstm_hidden]
+        final_last = lstm_out[:, -1, :]        # [B, 2*lstm_hidden]
+        final_feat = torch.cat([final_mean, final_last], dim=-1)  # [B, 4*lstm_hidden]
 
         # 7) Heads:
         class_logits = self.classifier(final_feat)  # => [B, num_actions]
