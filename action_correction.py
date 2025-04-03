@@ -205,21 +205,35 @@ def project_perfect_to_original(perfect_seq, original_seq):
 
     return projected_seq
 
-def compute_action_standard_score(original_seq, projected_seq, weight=10.0):
-    diff = original_seq[:, :, :3] - projected_seq[:, :, :3]  # (T,33,3)
-    distances = np.linalg.norm(diff, axis=-1)  # (T,33)
-    avg_distance = np.mean(distances)
-    score = max(0, 100 - weight * avg_distance)
+
+def compute_action_standard_score(original_seq, projected_seq, base_weight=10.0, keypoint_weights=None):
+    diff = original_seq[:, :, :3] - projected_seq[:, :, :3]
+    distances = np.linalg.norm(diff, axis=-1)
+
+    if keypoint_weights is None:
+        keypoint_weights = np.ones(33)
+    else:
+        keypoint_weights = np.array(keypoint_weights)
+        if keypoint_weights.shape[0] != 33:
+            raise ValueError("keypoint_weights must be of length 33.")
+
+    weighted_avg_per_frame = np.sum(distances * keypoint_weights, axis=1) / np.sum(keypoint_weights)
+
+    overall_weighted_avg = np.mean(weighted_avg_per_frame)
+
+    score = max(0, 100 - base_weight * overall_weighted_avg)
     return round(score, 2)
 
-def main():
+def test_BodyWeightSquats():
+    action = "BodyWeightSquats"
+
     standard_jsons = [
         'perfect_skeleton_data/BodyWeightSquats/perfect1.json',
-        'perfect_skeleton_data/BodyWeightSquats/perfect2.json',
-        'perfect_skeleton_data/BodyWeightSquats/perfect3.json'
+        'perfect_skeleton_data/BodyWeightSquats/perfect3.json',
+        'perfect_skeleton_data/BodyWeightSquats/perfect4.json'
     ]
-    original_video = "PerfectAction/BodyWeightSquats/perfect5.mp4"
-    original_seq = load_skeleton_sequence('perfect_skeleton_data/BodyWeightSquats/perfect5.json')
+    original_video = "PerfectAction/BodyWeightSquats/perfect2.mp4"
+    original_seq = load_skeleton_sequence('perfect_skeleton_data/BodyWeightSquats/perfect2.json')
 
     cap = cv2.VideoCapture(original_video)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -234,20 +248,84 @@ def main():
         print("Failed to load original skeleton sequence.")
         return
 
-    # 2. 将标准化后的骨架映射回原始空间
     projected_seq = project_perfect_to_original(perfect_seq, original_seq)
 
-    score = compute_action_standard_score(original_seq, projected_seq, weight=10.0)
-    print(f"Action Standard Score: {score}")
+    weights = None
+    if action == "BodyWeightSquats":
+        weights = np.zeros(33)
+        for idx in [11,12,23,24,25,26,27,28]:
+            weights[idx] = 1.0
+    elif action == "JumpingJack":
+        weights = np.zeros(33)
+        for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
+            weights[idx] = 1.0
+    elif action == "PushUps":
+        weights = np.zeros(33)
+        for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
+            weights[idx] = 1.0
 
-    # 3. 可视化叠加
-    output_video = "overlaid_skeleton.mp4"
+    score = compute_action_standard_score(original_seq, projected_seq, base_weight=10.0, keypoint_weights=weights)
+    print("Action Standard Score:", score)
+
+    output_video = "BodyWeightSquats_result.mp4"
     overlay_perfect_skeleton_on_video(projected_seq,
                                       video_path=original_video,
                                       output_path=output_video,
                                       scale=0.6,
                                       offset_x=150,
-                                      offset_y=80)  # scale 可设置为 1，因为是原始单位
+                                      offset_y=80)
+
+def test_JumpingJack():
+    action = "JumpingJack"
+
+    standard_jsons = [
+        'perfect_skeleton_data/JumpingJacks/perfect1.json',
+        'perfect_skeleton_data/JumpingJacks/perfect3.json',
+        'perfect_skeleton_data/JumpingJacks/perfect4.json'
+    ]
+    original_video = "PerfectAction/JumpingJack/perfect2.mp4"
+    original_seq = load_skeleton_sequence('perfect_skeleton_data/JumpingJacks/perfect2.json')
+
+    cap = cv2.VideoCapture(original_video)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+
+    perfect_seq = build_perfect_action(standard_jsons, target_len=total_frames)
+    if perfect_seq is None:
+        print("Failed to build perfect action.")
+        return
+
+    if original_seq is None:
+        print("Failed to load original skeleton sequence.")
+        return
+
+    projected_seq = project_perfect_to_original(perfect_seq, original_seq)
+
+    weights = None
+    if action == "BodyWeightSquats":
+        weights = np.zeros(33)
+        for idx in [11,12,23,24,25,26,27,28]:
+            weights[idx] = 1.0
+    elif action == "JumpingJack":
+        weights = np.zeros(33)
+        for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
+            weights[idx] = 1.0
+    elif action == "PushUps":
+        weights = np.zeros(33)
+        for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
+            weights[idx] = 1.0
+
+    score = compute_action_standard_score(original_seq, projected_seq, base_weight=10.0, keypoint_weights=weights)
+    print("Action Standard Score:", score)
+
+    output_video = "JumpingJack_result5.mp4"
+    overlay_perfect_skeleton_on_video(projected_seq,
+                                      video_path=original_video,
+                                      output_path=output_video,
+                                      scale=0.6,
+                                      offset_x=150,
+                                      offset_y=80)
 
 if __name__ == "__main__":
-    main()
+    test_BodyWeightSquats()
+    test_JumpingJack()
