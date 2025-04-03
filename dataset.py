@@ -103,6 +103,37 @@ def horizontal_flip(sequence):
     flipped[:, 0::4] = 1.0 - flipped[:, 0::4]
     return flipped
 
+def rotate_around_y(sequence, angle_deg=None, z_scale=320.0):
+    sequence = np.array(sequence, dtype=np.float32)
+    sequence = sequence.reshape(sequence.shape[0], 33, 4)
+
+    if angle_deg is None:
+        angle_deg = random.uniform(-30, 30)  # Random rotation angle in degrees
+    angle_rad = np.radians(angle_deg)
+
+    cos_theta = np.cos(angle_rad)
+    sin_theta = np.sin(angle_rad)
+    Ry = np.array([[cos_theta, 0, sin_theta],
+                   [0,         1, 0        ],
+                   [-sin_theta, 0, cos_theta]])
+
+    # Use point 23 (mid-hip) as rotation center
+    center = sequence[:, 23, :3].copy()
+
+    # Scale z to match x/y range (assuming 320px image width)
+    sequence[:, :, 2] *= z_scale
+    center[:, 2] *= z_scale
+
+    xyz = sequence[:, :, :3]
+    centered_xyz = xyz - center[:, np.newaxis, :]
+    rotated_xyz = np.einsum('ij,tkj->tki', Ry, centered_xyz)
+    sequence[:, :, :3] = rotated_xyz + center[:, np.newaxis, :]
+
+    # Rescale z back
+    sequence[:, :, 2] /= z_scale
+
+    return sequence.reshape(sequence.shape[0], -1)
+
 class RandomTransform:
     def __call__(self, sequence):
         if random.random() < 0.5:
