@@ -5,6 +5,7 @@ import shutil
 import numpy as np
 import trimesh
 import torch
+import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 
@@ -21,15 +22,28 @@ class FitnessDataset(Dataset):
         self.label_map = self._build_file_list_and_label_map()
 
     def _build_file_list_and_label_map(self):
-        dir = os.path.join(self.root_dir, self.split)
-        label_names = sorted(os.listdir(dir))
+        df = pd.read_excel(os.path.join(self.root_dir, "labels.xlsx"))
+        label_names = sorted(df["action_label"].unique())
         label_map = {label: idx for idx, label in enumerate(label_names)}
-        for label in label_names:
-            class_dir = os.path.join(dir, label)
-            for f in os.listdir(class_dir):
-                if f.endswith('.json'):
-                    self.files.append(os.path.join(class_dir, f))
-                    self.labels.append(label_map[label])
+
+        label_dict = {}
+        for _, row in df.iterrows():
+            key = str(row["filename"]).strip()  # e.g., "v_PushUps_g22_c04"
+            label_dict[key] = (label_map[row["action_label"]], row["rep_count"])
+    
+        # List the JSON files in the correct split folder (train or test)
+        split_folder = os.path.join(self.root_dir, self.split)
+        file_list = [f for f in os.listdir(split_folder) if f.endswith('.json')]
+    
+        for f in file_list:
+            # Remove extension to match the key in the label dictionary
+            key = os.path.splitext(f)[0]
+            if key in label_dict:
+                self.files.append(os.path.join(split_folder, f))
+                self.labels.append(label_dict[key])
+            else:
+                print("Warning: No label found for file", f)
+
         return label_map
 
 
@@ -75,12 +89,16 @@ def collate_fn(batch):
     # Sort by length (descending)
     lengths, perm_idx = lengths.sort(0, descending=True)
     padded = padded[perm_idx]
-    labels = torch.tensor(labels)[perm_idx]
+    action_labels = [lbl[0] for lbl in labels]
+    rep_counts = [lbl[1] for lbl in labels]
+
+    action_labels = torch.tensor(action_labels)[perm_idx]
+    rep_counts = torch.tensor(rep_counts, dtype=torch.float32)[perm_idx]
 
     # Pack
     packed_input = pack_padded_sequence(padded, lengths.cpu(), batch_first=True, enforce_sorted=True)
 
-    return packed_input, labels
+    return packed_input, (action_labels, rep_counts)
 
 #####################
 # Augmentation Functions
