@@ -20,6 +20,7 @@ class FitnessDataset(Dataset):
         self.files = []
         self.labels = []
         self.label_map = self._build_file_list_and_label_map()
+        print(f"[{self.split}] Loaded {len(self.files)} samples.")
 
     def _build_file_list_and_label_map(self):
         df = pd.read_excel(os.path.join(self.root_dir, "labels.xlsx"))
@@ -33,14 +34,20 @@ class FitnessDataset(Dataset):
     
         # List the JSON files in the correct split folder (train or test)
         split_folder = os.path.join(self.root_dir, self.split)
-        file_list = [f for f in os.listdir(split_folder) if f.endswith('.json')]
+        file_list = [
+            os.path.join(root, f)
+            for root, _, files in os.walk(split_folder)
+            for f in files if f.endswith(".json")
+        ]
     
         for f in file_list:
             # Remove extension to match the key in the label dictionary
-            key = os.path.splitext(f)[0]
+            # key = os.path.splitext(f)[0]
+            key = os.path.splitext(os.path.basename(f))[0]
             if key in label_dict:
-                self.files.append(os.path.join(split_folder, f))
+                # self.files.append(os.path.join(split_folder, f))
                 self.labels.append(label_dict[key])
+                self.files.append(f)
             else:
                 print("Warning: No label found for file", f)
 
