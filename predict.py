@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from model import GNNBiLSTMModel  # Replace with your actual model class
 from dataset import normalize_pose
+from model import build_mediapipe_adjacency
 
 
 def segment_predictions(pred_seq):
@@ -68,7 +69,7 @@ def main(json_path):
         print("Checkpoint not found. Using untrained model.")
     
     num_joints = 33
-    adj = torch.eye(num_joints, dtype=torch.float32).to(device)
+    adj = build_mediapipe_adjacency(num_joints).float().to(device)
     # Evaluate the model on the sequence.
     model.eval()
     with torch.no_grad():
