@@ -62,7 +62,6 @@ def main():
             # Reshape => [B, T, 33, 4] for GCN
             B, T, F = padded.shape
             padded = padded.view(B, T, 33, in_features).to(device)
-            
             # Forward
             action_logits, rep_count_pred, frame_scores = model(padded, adj)
             
@@ -111,7 +110,7 @@ def main():
 
         if epoch % eval_freq == 0:
             avg_val_loss, acc, mae, rmse, int_acc = evaluate(
-                model, val_loader, adj, in_features, device, criterion, criterion_rep, alpha=alpha, epoch=epoch
+                model, val_loader, adj, in_features, device, criterion, criterion_rep, criterion_phase, alpha=alpha, beta=beta,epoch=epoch
             )
             val_losses.append(avg_val_loss)
             print(f"Epoch {epoch+1}/{epochs} "
@@ -133,9 +132,31 @@ def main():
             torch.save(model.state_dict(), save_path)
             print(f"Saved model to {save_path}")
 
-    
+   
     # You could do a val loop, etc.
-def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_rep, alpha, epoch=None):
+
+def postprocess_frame_scores(frame_scores, method='normalize'):
+    """
+    frame_scores: torch.Tensor, shape = [T]
+    method: one of ['square', 'exp', 'normalize']
+    returns: numpy array of processed scores
+    """
+    scores = torch.sigmoid(frame_scores).detach().cpu().numpy()
+
+    # 前后10帧设置为0，避免边界误检
+    scores[:5] = 0
+    scores[-5:] = 0
+
+    if method == 'square':
+        scores = scores ** 2
+    elif method == 'exp':
+        scores = np.exp(3 * (scores - 1))  # 非线性放大
+    elif method == 'normalize':
+        scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+
+    return scores
+
+def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_rep, criterion_phase, alpha, beta,  epoch=None):
     model.eval()
     val_loss = 0.0
     correct = 0
@@ -147,6 +168,8 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
         for packed_input, (action_labels, rep_counts, filenames) in val_loader:
             action_labels = action_labels.to(device)
             rep_counts = rep_counts.to(device)
+            if rep_counts.dim() == 1:
+                rep_counts = rep_counts.unsqueeze(-1)
             padded, lengths = torch.nn.utils.rnn.pad_packed_sequence(packed_input, batch_first=True)
             B, T, F = padded.shape
             padded = padded.view(B, T, 33, in_features).to(device)
@@ -159,7 +182,7 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
                 # filenames = batch_data[2] if len(batch_data) > 2 else [f"sample{i}.json" for i in range(frame_scores.shape[0])]
 
                 for i in range(min(4, frame_scores.shape[0])):  # 最多画4张
-                    scores = torch.sigmoid(frame_scores[i]).detach().cpu().numpy()
+                    scores = postprocess_frame_scores(frame_scores[i], method='normalize')
                     peaks, _ = find_peaks(scores, height=0.5, distance=10)
                     file_stem = filenames[i].replace('.json', '')
                     plt.figure(figsize=(8, 3))
@@ -184,7 +207,21 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
 
             loss_action = criterion(action_logits, action_labels)
             loss_rep = criterion_rep(rep_count_pred, rep_counts)
-            loss = loss_action + alpha * loss_rep
+            rep_phase_gt = torch.zeros(B, T, device=device)
+            for b in range(B):
+                r = int(round(rep_counts[b].item()))
+                if r > 0:
+                    # Evenly split T frames into r segments
+                    divisions = np.linspace(0, T, r + 1, endpoint=True)
+                    # For each segment, compute midpoint index
+                    midpoints = [(divisions[i] + divisions[i+1]) / 2 for i in range(r)]
+                    midpoints = [min(T - 1, max(0, int(round(mp)))) for mp in midpoints]
+                    for idx in midpoints:
+                        rep_phase_gt[b, idx] = 1
+            # phase_logits is [B, T, 2] and ground truth is [B, T]
+            loss_phase = criterion_phase(frame_scores.view(B * T), rep_phase_gt.view(B * T))
+            loss = loss_action + alpha * loss_rep + beta * loss_phase
+            print(f"[VAL] Action Loss={loss_action.item():.4f}, Rep Loss={loss_rep.item():.4f}, Phase Loss={loss_phase.item():.4f}, Total={loss.item():.4f}")
 
             val_loss += loss.item() * B
             total += B
