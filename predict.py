@@ -6,21 +6,37 @@ import numpy as np
 from model import GNNBiLSTMModel  # Replace with your actual model class
 from dataset import normalize_pose
 from model import build_mediapipe_adjacency
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
 
 
-def segment_predictions(pred_seq):
+def segment_reps_from_peaks(peaks, total_frames):
     segments = []
-    if len(pred_seq) == 0:
+    if len(peaks) == 0:
         return segments
-
-    current_action = pred_seq[0]
-    start_frame = 0
-    for t in range(1, len(pred_seq)):
-        if pred_seq[t] != current_action:
-            segments.append((current_action, start_frame, t - 1))
-            current_action = pred_seq[t]
-            start_frame = t
-    segments.append((current_action, start_frame, len(pred_seq) - 1))
+    if len(peaks) == 1:
+        # If only one rep is detected, define a small window around it.
+        start = max(0, peaks[0] - 5)
+        end = min(total_frames - 1, peaks[0] + 5)
+        segments.append((start, end))
+        return segments
+    
+    # First rep:
+    first_start = max(0, int(peaks[0] - (peaks[1] - peaks[0]) / 2))
+    first_end = int((peaks[0] + peaks[1]) / 2)
+    segments.append((first_start, first_end))
+    
+    # Intermediate reps:
+    for i in range(1, len(peaks) - 1):
+        start = int((peaks[i - 1] + peaks[i]) / 2) + 1
+        end = int((peaks[i] + peaks[i + 1]) / 2)
+        segments.append((start, end))
+    
+    # Last rep:
+    last_start = int((peaks[-2] + peaks[-1]) / 2) + 1
+    last_end = min(total_frames - 1, int(peaks[-1] + (peaks[-1] - peaks[-2]) / 2))
+    segments.append((last_start, last_end))
+    
     return segments
 
 def main(json_path):
@@ -32,9 +48,10 @@ def main(json_path):
     
     sequence = []
     for frame in data:
-        # If the frame doesn't have a pose, use a default value.
-        pose = frame.get('pose', [[0, 0, 0, 0]] * 33)
-        # Flatten the list-of-lists: 33 joints * 4 features = 132 features.
+        pose = frame.get('pose', None)
+        # Ensure we have exactly 33 joints; if not, fill with default values.
+        if pose is None or len(pose) != 33:
+            pose = [[0, 0, 0, 0]] * 33
         flat_pose = [v for joint in pose for v in joint]
         sequence.append(flat_pose)
     
@@ -57,7 +74,7 @@ def main(json_path):
     model = GNNBiLSTMModel(in_features, gcn_hidden, lstm_hidden, num_actions)
     model = model.to(device)
     
-    checkpoint_path = r"C:\Users\yeeli\Desktop\Lab\Final\FitnessCoach\FitnessCoach\checkpoints\model_epoch_901.pt"
+    checkpoint_path = r"C:\Users\yeeli\Desktop\Lab\Final\FitnessCoach\FitnessCoach\checkpoints\model_epoch_1000.pt"
     if os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         if 'model_state_dict' in checkpoint:
@@ -73,37 +90,98 @@ def main(json_path):
     # Evaluate the model on the sequence.
     model.eval()
     with torch.no_grad():
-        # If your model expects an adjacency matrix, replace None with the proper matrix.
-        action_logits, _ = model(sequence_tensor, adj)
-        # Assuming action_logits is of shape [1, T, num_actions], get per-frame predictions.
-        predicted_actions = torch.argmax(action_logits, dim=-1)  # shape: [1, T]
-        predicted_actions = predicted_actions.squeeze(0).cpu().numpy()  # shape: [T]
-        predicted_actions = np.atleast_1d(predicted_actions)
+        action_logits, rep_count_pred, frame_scores = model(sequence_tensor, adj)
+        
+        # For overall action classification, use the final time step:
+        final_action_logits = action_logits
+        predicted_action = torch.argmax(final_action_logits, dim=-1).item()
+        
+        # Get the predicted rep count
+        predicted_rep_count = int(round(rep_count_pred.squeeze().item()))
+        
+        # Process frame_scores if desired.
+        # For instance, you might threshold them to mark rep-phase frames:
+        frame_scores = frame_scores.cpu().numpy()  # shape: [T]
+        phase_prob = 1 / (1 + np.exp(-frame_scores))
+        phase_prob = np.squeeze(phase_prob)  # ensure 1-D array
+
+        # Detect candidate peaks with a lower threshold to capture more candidates.
+        candidate_peaks, properties = find_peaks(phase_prob, height=0.02, distance=5)
+
+        # Get the predicted rep count (an integer).
+        predicted_rep_count = int(round(rep_count_pred.squeeze().item()))
+
+        # If there are more candidate peaks than the predicted count, select the top ones.
+        if len(candidate_peaks) > predicted_rep_count and predicted_rep_count > 0:
+            # Sort candidate peaks by their peak height in descending order.
+            peak_heights = properties['peak_heights']
+            # Get indices that would sort peaks by height.
+            sorted_idx = np.argsort(peak_heights)[::-1]
+            # Select the top predicted_rep_count peaks.
+            selected_peaks = candidate_peaks[sorted_idx][:predicted_rep_count]
+            # Then sort the selected peaks in ascending order (so they are in time order).
+            selected_peaks = np.sort(selected_peaks)
+        else:
+            # If fewer peaks are detected, use them as is.
+            selected_peaks = candidate_peaks
+
+        print("Selected peaks:", selected_peaks)
+
+        # Now, define rep segments based on these peaks.
+        def segment_reps_from_selected_peaks(peaks, total_frames):
+            segments = []
+            if len(peaks) == 0:
+                return segments
+            if len(peaks) == 1:
+                start = max(0, peaks[0] - 5)
+                end = min(total_frames - 1, peaks[0] + 5)
+                segments.append((start, end))
+                return segments
     
-    # Segment the predictions into contiguous intervals.
-    segments = segment_predictions(predicted_actions)
+            # For the first rep, we might start at frame 0 or use a midpoint.
+            first_start = max(0, int(peaks[0] - (peaks[1] - peaks[0]) / 2))
+            first_end = int((peaks[0] + peaks[1]) / 2)
+            segments.append((first_start, first_end))
     
-    # Define a mapping from numeric labels to action names.
-    # This mapping should match how your dataset was constructed.
+            # For intermediate reps:
+            for i in range(1, len(peaks) - 1):
+                start = int((peaks[i - 1] + peaks[i]) / 2) + 1
+                end = int((peaks[i] + peaks[i + 1]) / 2)
+                segments.append((start, end))
+    
+            # For the last rep:
+            last_start = int((peaks[-2] + peaks[-1]) / 2) + 1
+            last_end = min(total_frames - 1, int(peaks[-1] + (peaks[-1] - peaks[-2]) / 2))
+            segments.append((last_start, last_end))
+            return segments
+
+        rep_segments = segment_reps_from_selected_peaks(selected_peaks, T)
+    
     label_mapping = {0: "JumpingJacks", 1: "PushUps", 2: "Squats"}
     
-    # Print the segmentation results.
-    print("Predicted Action Segments:")
-    for seg in segments:
-        action_idx, start, end = seg
-        action_name = label_mapping.get(action_idx, str(action_idx))
-        duration = end - start + 1
-        print(f"  Action: {action_name} (Label {action_idx}) from Frame {start} to {end} (Duration: {duration} frames)")
+    print("\nPredicted Overall Action:")
+    print(f"  {label_mapping.get(predicted_action, str(predicted_action))} (Label {predicted_action})")
+    print(f"Predicted Rep Count: {predicted_rep_count}\n")
     
-    # Count how many times each action appears.
-    action_counts = {}
-    for seg in segments:
-        action_idx = seg[0]
-        action_name = label_mapping.get(action_idx, str(action_idx))
-        action_counts[action_name] = action_counts.get(action_name, 0) + 1
-    print("\nAction Occurrences:")
-    for action_name, count in action_counts.items():
-        print(f"  {action_name}: {count} time(s)")
+    if rep_segments:
+        print("Detected Rep Segments:")
+        for i, seg in enumerate(rep_segments, 1):
+            start, end = seg
+            print(f"  Rep {i}: Frames {start} to {end} (Duration: {end - start + 1} frames)")
+    else:
+        print("No rep segments detected based on phase peaks.")
+    
+    # Optionally, plot frame phase scores.
+    plt.figure(figsize=(10, 4))
+    plt.plot(phase_prob, label="Phase Probability")
+    plt.plot(selected_peaks, phase_prob[selected_peaks], "ro", label="Detected Peaks")
+    plt.title("Frame-level Phase Probability")
+    plt.xlabel("Frame")
+    plt.ylabel("Probability")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
