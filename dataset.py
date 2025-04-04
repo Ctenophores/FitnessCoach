@@ -8,6 +8,7 @@ import torch
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
+from scipy.signal import savgol_filter
 
 
 class FitnessDataset(Dataset):
@@ -72,6 +73,7 @@ class FitnessDataset(Dataset):
 
         sequence = np.array(sequence, dtype=np.float32)
         sequence = normalize_pose(sequence)
+        sequence = smooth_sequence_savgol(sequence, window_length=7, polyorder=2)
             
 
         if self.augment:
@@ -80,14 +82,15 @@ class FitnessDataset(Dataset):
         if self.transform:
             sequence = self.transform(sequence)
 
-        return torch.tensor(sequence, dtype=torch.float32), label
+        filename = os.path.basename(file_path)
+        return torch.tensor(sequence, dtype=torch.float32), label, filename
 
 
 #####################
 # Collate Function for PackedSequence
 #####################
 def collate_fn(batch):
-    sequences, labels = zip(*batch)
+    sequences, labels, filenames = zip(*batch)
     lengths = torch.tensor([len(seq) for seq in sequences], dtype=torch.long)
 
     # Pad sequences
@@ -101,11 +104,11 @@ def collate_fn(batch):
 
     action_labels = torch.tensor(action_labels)[perm_idx]
     rep_counts = torch.tensor(rep_counts, dtype=torch.float32)[perm_idx]
-
+    filenames = [filenames[i] for i in perm_idx]
     # Pack
     packed_input = pack_padded_sequence(padded, lengths.cpu(), batch_first=True, enforce_sorted=True)
 
-    return packed_input, (action_labels, rep_counts)
+    return packed_input, (action_labels, rep_counts, filenames)
 
 #####################
 # Augmentation Functions
@@ -159,6 +162,18 @@ def rotate_around_y(sequence, angle_deg=None, z_scale=320.0):
 
     return sequence.reshape(sequence.shape[0], -1)
 
+def scale_pose(sequence, scale_range=(0.8, 1.2), center_joint=23):
+    """对所有关键点做等比缩放（以某个点为中心）"""
+    scale = np.random.uniform(*scale_range)
+    sequence = sequence.reshape(sequence.shape[0], 33, 4)
+
+    center = sequence[:, center_joint, :3].copy()  # 以髋部为中心缩放
+    sequence[:, :, :3] -= center[:, None, :]
+    sequence[:, :, :3] *= scale
+    sequence[:, :, :3] += center[:, None, :]
+
+    return sequence.reshape(sequence.shape[0], -1)
+
 class RandomTransform:
     def __call__(self, sequence):
         if random.random() < 0.5:
@@ -186,6 +201,9 @@ def normalize_pose(sequence):
     sequence[:, :, :2] /= scale[:, np.newaxis]
 
     return sequence.reshape(sequence.shape[0], -1)
+
+def smooth_sequence_savgol(sequence, window_length=7, polyorder=2):
+    return savgol_filter(sequence, window_length=window_length, polyorder=polyorder, axis=0)
 
 #####################
 # DataLoader Preparation
