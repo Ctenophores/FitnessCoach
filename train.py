@@ -229,7 +229,7 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
             correct += (pred_labels == action_labels).sum().item()
 
             rep_preds_all.extend(rep_count_pred.squeeze().cpu().numpy())
-            rep_trues_all.extend(rep_counts.cpu().numpy())
+            rep_trues_all.extend(rep_counts.squeeze().cpu().numpy())
 
     avg_val_loss = val_loss / total
     accuracy = correct / total * 100
