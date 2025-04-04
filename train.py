@@ -8,6 +8,7 @@ from dataset import get_dataloaders, collate_fn
 
 from model import GNNBiLSTMModel, build_mediapipe_adjacency
 import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -18,6 +19,8 @@ def main():
     lstm_hidden = 64
     num_classes = 3      # e.g. squat=0, pushup=1, lunge=2, etc.
     save_freq = 100
+    eval_freq = 20
+    
 
     # Initialize model
     model = GNNBiLSTMModel(in_features, gcn_hidden, lstm_hidden, num_classes).to(device)
@@ -58,7 +61,7 @@ def main():
             padded = padded.view(B, T, 33, in_features).to(device)
             
             # Forward
-            action_logits, rep_count_pred = model(padded, adj)
+            action_logits, rep_count_pred, frame_scores = model(padded, adj)
             
             # If you have 1 label per entire sequence, pick final step
             # shape => [B, num_classes]
@@ -67,7 +70,7 @@ def main():
             
             # If you have 1 label per sequence => labels shape [B]
             # Cross-entropy
-            alpha = 1.0
+            alpha = 3.0
             loss_action = criterion(final_action_logits, action_labels)
             loss_rep = criterion_rep(final_rep_count_pred, rep_counts)
             loss = loss_action + alpha * loss_rep
@@ -84,14 +87,24 @@ def main():
         train_losses.append(avg_loss)
         print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}")
 
-        if (epoch+1) % save_freq == 0:
+        if epoch % eval_freq == 0:
             avg_val_loss, acc, mae, rmse, int_acc = evaluate(
-                model, val_loader, adj, in_features, device, criterion, criterion_rep
+                model, val_loader, adj, in_features, device, criterion, criterion_rep, alpha=alpha, epoch=epoch
             )
             val_losses.append(avg_val_loss)
             print(f"Epoch {epoch+1}/{epochs} "
                   f"Val Loss: {avg_val_loss:.4f} | Val Acc: {acc:.2f}% | "
                   f"Rep MAE: {mae:.2f}, RMSE: {rmse:.2f}, Int Acc: {int_acc*100:.2f}%")
+            plot_loss(val_losses, save_path="val_loss_curve.png")
+
+        if (epoch+1) % save_freq == 0:
+            # avg_val_loss, acc, mae, rmse, int_acc = evaluate(
+            #     model, val_loader, adj, in_features, device, criterion, criterion_rep
+            # )
+            # val_losses.append(avg_val_loss)
+            # print(f"Epoch {epoch+1}/{epochs} "
+            #       f"Val Loss: {avg_val_loss:.4f} | Val Acc: {acc:.2f}% | "
+            #       f"Rep MAE: {mae:.2f}, RMSE: {rmse:.2f}, Int Acc: {int_acc*100:.2f}%")
             plot_loss(train_losses)
             save_path = f"checkpoints/model_epoch_{epoch+1}.pt"
             os.makedirs("checkpoints", exist_ok=True)
@@ -100,7 +113,7 @@ def main():
 
     
     # You could do a val loop, etc.
-def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_rep):
+def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_rep, alpha, epoch=None):
     model.eval()
     val_loss = 0.0
     correct = 0
@@ -116,10 +129,31 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
             B, T, F = padded.shape
             padded = padded.view(B, T, 33, in_features).to(device)
 
-            action_logits, rep_count_pred = model(padded, adj)
+            action_logits, rep_count_pred, frame_scores = model(padded, adj)
+
+
+            if epoch is not None:
+                os.makedirs("frame_score_plots", exist_ok=True)
+                # filenames = batch_data[2] if len(batch_data) > 2 else [f"sample{i}.json" for i in range(frame_scores.shape[0])]
+
+                for i in range(min(4, frame_scores.shape[0])):  # 最多画4张
+                    scores = frame_scores[i].detach().cpu().numpy()
+                    peaks, _ = find_peaks(scores, height=0.5, distance=10)
+                    plt.figure(figsize=(8, 3))
+                    plt.plot(scores, label="Frame Scores")
+                    plt.plot(peaks, scores[peaks], "ro", label="Detected Peaks")
+                    plt.title(f"Sample {i} - Epoch {epoch}")
+                    plt.xlabel("Frame")
+                    plt.ylabel("Score")
+                    plt.legend()
+                    plt.grid(True)
+                    plt.tight_layout()
+                    plt.savefig(f"frame_score_plots/frame_scores_sample{i}_epoch{epoch}.png")
+                    plt.close()
+
             loss_action = criterion(action_logits, action_labels)
             loss_rep = criterion_rep(rep_count_pred, rep_counts)
-            loss = loss_action + loss_rep
+            loss = loss_action + alpha * loss_rep
 
             val_loss += loss.item() * B
             total += B

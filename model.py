@@ -51,6 +51,7 @@ class GCNLayer(nn.Module):
             nn.Linear(in_features, out_features)
             if in_features != out_features else None
         )
+        self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, adj):
         # Summation of neighbor features:
@@ -59,6 +60,8 @@ class GCNLayer(nn.Module):
         neighbor_sum = neighbor_sum.permute(0, 2, 1)  # => [B, J, in_features]
         
         out = self.linear(neighbor_sum)
+        out = self.dropout(out)
+        
 
         #### Add Residual
         residual = x
@@ -87,6 +90,7 @@ class GNNBiLSTMModel(nn.Module):
             num_layers=2,
             dropout=0.3
         )
+        self.dropout = nn.Dropout(0.3)
         
         # Classifier for frame-level predictions
         # self.classifier = nn.Linear(2 * lstm_hidden, num_actions)
@@ -94,6 +98,7 @@ class GNNBiLSTMModel(nn.Module):
         # self.regressor = nn.Linear(2*lstm_hidden, 1)
         self.classifier = nn.Linear(4 * lstm_hidden, num_actions)
         self.regressor = nn.Linear(4 * lstm_hidden, 1)
+        self.frame_score_head = nn.Linear(2 * lstm_hidden, 1)  # frame-level rep score head
     
     def forward(self, x, adj):
         B, T, J, F = x.shape
@@ -121,10 +126,12 @@ class GNNBiLSTMModel(nn.Module):
         final_mean = lstm_out.mean(dim=1)      # [B, 2*lstm_hidden]
         final_last = lstm_out[:, -1, :]        # [B, 2*lstm_hidden]
         final_feat = torch.cat([final_mean, final_last], dim=-1)  # [B, 4*lstm_hidden]
+        final_feat = self.dropout(final_feat)
 
         # 7) Heads:
         class_logits = self.classifier(final_feat)  # => [B, num_actions]
         rep_pred     = self.regressor(final_feat)   # => [B, 1]
+        frame_scores = self.frame_score_head(lstm_out).squeeze(-1)  # shape: [B, T]
         
-        return class_logits, rep_pred
+        return class_logits, rep_pred, frame_scores
     
