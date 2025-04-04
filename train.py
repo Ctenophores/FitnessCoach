@@ -32,8 +32,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
     criterion_rep = nn.MSELoss()
-    # criterion_rep = nn.L1Loss()
-    criterion_frame = nn.BCEWithLogitsLoss()
+    criterion_phase = nn.BCEWithLogitsLoss()
     
     # Get data loaders from your dataset.py
     train_loader, val_loader = get_dataloaders(data_root='split_data', batch_size=8)
@@ -50,6 +49,8 @@ def main():
         for packed_input, (action_labels, rep_counts, _) in train_loader:
             action_labels = action_labels.to(device)
             rep_counts = rep_counts.to(device)
+            if rep_counts.dim() == 1:
+                rep_counts = rep_counts.unsqueeze(-1)
             # We need to handle the PackedSequence. Let’s see how to do that:
             # 1) Unpack to get padded => shape [B, T, F]
             padded, lengths = torch.nn.utils.rnn.pad_packed_sequence(
@@ -76,11 +77,25 @@ def main():
             # Cross-entropy
             alpha = 3.0
             beta = 1.0
+
             loss_action = criterion(final_action_logits, action_labels)
             loss_rep = criterion_rep(final_rep_count_pred, rep_counts)
-            loss_frame = criterion_frame(frame_scores, frame_labels)
 
-            loss = loss_action + alpha * loss_rep + beta * loss_frame
+            rep_phase_gt = torch.zeros(B, T, device=device)
+            for b in range(B):
+                r = int(round(rep_counts[b].item()))
+                if r > 0:
+                    # Evenly split T frames into r segments
+                    divisions = np.linspace(0, T, r + 1, endpoint=True)
+                    # For each segment, compute midpoint index
+                    midpoints = [(divisions[i] + divisions[i+1]) / 2 for i in range(r)]
+                    midpoints = [min(T - 1, max(0, int(round(mp)))) for mp in midpoints]
+                    for idx in midpoints:
+                        rep_phase_gt[b, idx] = 1
+            # phase_logits is [B, T, 2] and ground truth is [B, T]
+            loss_phase = criterion_phase(frame_scores.view(B * T), rep_phase_gt.view(B * T))
+
+            loss = loss_action + alpha * loss_rep + beta * loss_phase
             
             optimizer.zero_grad()
             loss.backward()
