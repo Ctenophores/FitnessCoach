@@ -23,41 +23,103 @@ def load_skeleton_sequence(json_path):
         return None
     return np.stack(frames, axis=0)  # (T, 33, 4)
 
-def normalize_pose_and_store_params(sequence):
+def compute_transform_params(pose, action):
+    eps = 1e-8
+    left_ankle = pose[27, :3]
+    right_ankle = pose[28, :3]
+    left_wrist = pose[15, :3]
+    right_wrist = pose[16, :3]
+    left_shoulder = pose[11, :3]
+    right_shoulder = pose[12, :3]
+    left_hip = pose[23, :3]
+    right_hip = pose[24, :3]
+
+    shoulder_mid = (left_shoulder + right_shoulder) / 2.0
+    hip_mid = (left_hip + right_hip) / 2.0
+    ankle_mid = (left_ankle + right_ankle) / 2.0
+    wrist_mid = (left_wrist + right_wrist) / 2.0
+
+    if action == "BodyWeightSquats":
+        origin = ankle_mid
+        scale = np.linalg.norm(shoulder_mid - origin)
+        x_axis = right_hip - left_hip
+        if np.linalg.norm(x_axis) < eps:
+            x_axis = np.array([1, 0, 0], dtype=np.float32)
+        else:
+            x_axis /= (np.linalg.norm(x_axis) + eps)
+        up_vector = shoulder_mid - hip_mid
+        y_axis = up_vector - np.dot(up_vector, x_axis) * x_axis
+        if np.linalg.norm(y_axis) < eps:
+            y_axis = np.array([0, 1, 0], dtype=np.float32)
+        else:
+            y_axis /= (np.linalg.norm(y_axis) + eps)
+    elif action == "PushUps":
+        origin = (left_wrist + right_wrist + left_ankle + right_ankle) / 4.0
+        scale = np.linalg.norm(ankle_mid - shoulder_mid)
+        x_axis = right_wrist - left_wrist
+        if np.linalg.norm(x_axis) < eps:
+            x_axis = np.array([1, 0, 0], dtype=np.float32)
+        else:
+            x_axis /= (np.linalg.norm(x_axis) + eps)
+        body_vector = ankle_mid - wrist_mid
+        if np.linalg.norm(body_vector) < eps:
+            body_vector = np.array([0, 1, 0], dtype=np.float32)
+        else:
+            body_vector /= (np.linalg.norm(body_vector) + eps)
+        y_axis = body_vector
+    else:
+        origin = hip_mid
+        scale = np.linalg.norm(shoulder_mid - origin)
+        x_axis = right_hip - left_hip
+        if np.linalg.norm(x_axis) < eps:
+            x_axis = np.array([1, 0, 0], dtype=np.float32)
+        else:
+            x_axis /= (np.linalg.norm(x_axis) + eps)
+
+        up_vector = shoulder_mid - origin
+        y_axis = up_vector - np.dot(up_vector, x_axis) * x_axis
+        if np.linalg.norm(y_axis) < eps:
+            y_axis = np.array([0, 1, 0], dtype=np.float32)
+        else:
+            y_axis /= (np.linalg.norm(y_axis) + eps)
+
+    z_axis = np.cross(x_axis, y_axis)
+    if np.linalg.norm(z_axis) < eps:
+        z_axis = np.array([0, 0, 1], dtype=np.float32)
+    else:
+        z_axis /= (np.linalg.norm(z_axis) + eps)
+    y_axis = np.cross(z_axis, x_axis)
+    y_axis /= (np.linalg.norm(y_axis) + eps)
+
+    R = np.stack([x_axis, y_axis, z_axis], axis=1)  # (3,3)
+
+    return origin, R, scale
+
+def normalize_pose_and_store_params(sequence, action=None):
     sequence = np.array(sequence, dtype=np.float32)
     num_frames = sequence.shape[0]
     norm_seq = np.empty_like(sequence)
     transform_params = []
+
+    origin = None
+    R = None
+    scale = None
+
+    origin, R, scale = compute_transform_params(sequence[0], action)
+
     for i in range(num_frames):
-        pose = sequence[i]  # (33, 4)
-        left_hip = pose[23, :3]
-        right_hip = pose[24, :3]
-        shoulder_mid = (pose[11, :3] + pose[12, :3]) / 2.0
-        origin = (left_hip + right_hip) / 2.0
+        pose = sequence[i]  # (33,4)
 
-        x_axis = right_hip - left_hip
-        x_axis /= (np.linalg.norm(x_axis) + 1e-8)
+        assert (origin is not None and R is not None and scale is not None), "origin/R/scale need to be NOT None!"
 
-        up_vector = shoulder_mid - origin
-        y_axis = up_vector - np.dot(up_vector, x_axis) * x_axis
-        y_axis /= (np.linalg.norm(y_axis) + 1e-8)
-
-        z_axis = np.cross(x_axis, y_axis)
-        z_axis /= (np.linalg.norm(z_axis) + 1e-8)
-        y_axis = np.cross(z_axis, x_axis)
-        y_axis /= (np.linalg.norm(y_axis) + 1e-8)
-
-        R = np.stack([x_axis, y_axis, z_axis], axis=1)  # (3,3)
         xyz = pose[:, :3] - origin
         xyz_rot = xyz @ R
-        # 采用更稳定的尺度：肩膀中点与左右髋中心的距离
-        scale = np.linalg.norm(shoulder_mid - ((left_hip+right_hip)/2.0))
-        scale = max(scale, 1e-5)
+
+        scale = max(scale, 1e-10)
         xyz_rot /= scale
 
         norm_seq[i, :, :3] = xyz_rot
         norm_seq[i, :, 3] = pose[:, 3]
-
         transform_params.append({
             "center": origin,
             "R": R,
@@ -79,13 +141,13 @@ def time_resample(sequence, new_len=100):
             out_seq[:, i, j] = f(x_new)
     return out_seq
 
-def build_perfect_action(json_paths: List[str], target_len=100):
+def build_perfect_action(json_paths: List[str], target_len, action):
     sequences = []
     for p in json_paths:
         seq = load_skeleton_sequence(p)
         if seq is None or seq.shape[0] < 2:
             continue
-        norm_seq, _ = normalize_pose_and_store_params(seq)
+        norm_seq, _ = normalize_pose_and_store_params(seq, action)
         seq_resampled = time_resample(norm_seq, new_len=target_len)
         sequences.append(seq_resampled)
     if not sequences:
@@ -130,37 +192,20 @@ def draw_skeleton_on_frame_custom(frame, skeleton_33x4, width, height, scale=1.0
     for (px, py) in points_2d:
         cv2.circle(frame, (px, py), point_radius, point_color, -1)
 
-def overlay_two_skeletons_on_video(original_seq, perfect_seq, video_path, output_path, scale_orig, offset_x_orig, offset_y_orig, scale_perfect, offset_x_perfect, offset_y_perfect, inverse=False):
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Cannot open video {video_path}")
-        return
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    T = min(original_seq.shape[0], perfect_seq.shape[0], total_frames)
-    print(f"Video frames={total_frames}, using {T} frames.")
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret or frame_idx >= T:
-            break
-        # 绘制原始骨架，使用自定义颜色
-        draw_skeleton_on_frame_custom(frame, original_seq[frame_idx],
-                                      width, height, scale_orig, offset_x_orig, offset_y_orig,
-                                      line_color=(255, 255, 255), point_color=(0, 0, 255))
-        # 绘制完美骨架
-        draw_skeleton_on_frame_custom(frame, perfect_seq[frame_idx],
-                                      width, height, scale_perfect, offset_x_perfect, offset_y_perfect,
-                                      line_color=(0,255,0), point_color=(255,0,0), inverse=inverse)
-        out.write(frame)
-        frame_idx += 1
-    cap.release()
-    out.release()
-    print(f"Overlay video saved to: {output_path}")
+def overlay_skeleton_in_corner(frame, skeleton, width, height, region_ratio=1 / 3, scale=1.0, offset_x=0, offset_y=0, line_color=(255, 255, 255), point_color=(0, 0, 255), point_radius=4, line_thickness=2):
+    region_w = int(width * region_ratio)
+    region_h = int(height * region_ratio)
+
+    roi = np.ones((region_h, region_w, 3), dtype=np.uint8) * 255
+
+    draw_skeleton_on_frame_custom(roi, skeleton, region_w, region_h,
+                                  scale=scale, offset_x=offset_x, offset_y=offset_y,
+                                  line_color=line_color, point_color=point_color,
+                                  point_radius=point_radius, line_thickness=line_thickness)
+
+    x_start = width - region_w
+    y_start = 0
+    frame[y_start:y_start + region_h, x_start:x_start + region_w] = roi
 
 def compute_action_standard_score(original_seq, projected_seq, base_weight=10.0, keypoint_weights=None):
     diff = original_seq[:, :, :3] - projected_seq[:, :, :3]
@@ -174,6 +219,64 @@ def compute_action_standard_score(original_seq, projected_seq, base_weight=10.0,
     weighted_avg_per_frame = np.sum(distances * keypoint_weights, axis=1) / np.sum(keypoint_weights)
     overall_weighted_avg = np.mean(weighted_avg_per_frame)
     score = max(0, 100 - base_weight * overall_weighted_avg)
+    return round(score, 2)
+
+def compute_action_angle_score(original_seq, perfect_seq, action, base_weight=30.0):
+    def compute_angle(p1, p2, p3):
+        v1 = p1 - p2
+        v2 = p3 - p2
+        dot = np.dot(v1, v2)
+        norm = np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8
+        angle = np.arccos(np.clip(dot / norm, -1.0, 1.0))
+        return angle
+
+    angle_definitions = {
+        "BodyWeightSquats": [
+            (23, 25, 27),
+            (24, 26, 28),
+            (12, 24, 26),
+            (11, 23, 25),
+
+        ],
+        "JumpingJack": [
+            (11, 13, 15),
+            (12, 14, 16),
+            (12, 24, 26),
+            (11, 23, 25),
+            (14, 12, 24),
+            (13, 11, 23)
+        ],
+        "PushUps": [
+            (11, 13, 15),
+            (12, 14, 16),
+            (12, 24, 26),
+            (11, 23, 25),
+            (14, 12, 24),
+            (13, 11, 23)
+        ]
+    }
+    angle_defs = angle_definitions.get(action, [])
+    if not angle_defs:
+        print("No angle definitions for action:", action)
+        return None
+
+    errors = []
+    for (p1, p2, p3) in angle_defs:
+        max_angle_orig = 0
+        max_angle_perfect = 0
+        T = original_seq.shape[0]
+        for i in range(T):
+            orig_pose = original_seq[i, :, :3]      # (33,3)
+            perfect_pose = perfect_seq[i, :, :3]    # (33,3)
+            angle_orig = compute_angle(orig_pose[p1], orig_pose[p2], orig_pose[p3])
+            angle_perfect = compute_angle(perfect_pose[p1], perfect_pose[p2], perfect_pose[p3])
+            if angle_orig > max_angle_orig:
+                max_angle_orig = angle_orig
+            if angle_perfect > max_angle_perfect:
+                max_angle_perfect = angle_perfect
+        errors.append(abs(max_angle_orig - max_angle_perfect))
+    overall_error = np.mean(errors)
+    score = max(0, 100 - base_weight * overall_error)
     return round(score, 2)
 
 def smooth_sequence(seq, window_size=5):
@@ -207,69 +310,8 @@ def align_frame_perfect_to_original(perfect_frame, original_frame):
     aligned_frame[:, :3] = X_aligned
     return aligned_frame
 
-def test():
-    action = "PushUps" # BodyWeightSquats, JumpingJack, PushUps
-    standard_jsons = [
-        'perfect_skeleton_data/' + action + '/perfect1.json',
-        'perfect_skeleton_data/' + action + '/perfect2.json',
-        'perfect_skeleton_data/' + action + '/perfect3.json',
-        'perfect_skeleton_data/' + action + '/perfect4.json',
-        'perfect_skeleton_data/' + action + '/perfect5.json',
-    ]
-    original_video = "test_video/1b91c4e6dbb036579fb38ac1303f028e.mp4"
-    original_seq_total = load_skeleton_sequence('test_skeleton_json/1b91c4e6dbb036579fb38ac1303f028e.json')
-
-    cap = cv2.VideoCapture(original_video)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
-
-    num_of_action = 3 # need to modified
-    num_of_frames_per_action = int(total_frames / num_of_action)
-
-    original_seq = original_seq_total[0:num_of_frames_per_action]
-
-    perfect_seq = build_perfect_action(standard_jsons, target_len=num_of_frames_per_action)
-    if perfect_seq is None:
-        print("Failed to build perfect action.")
-        return
-    if original_seq is None:
-        print("Failed to load original skeleton sequence.")
-        return
-
-    orig_norm_seq, transform_params = normalize_pose_and_store_params(original_seq)
-
-    weights = None
-    if action == "BodyWeightSquats":
-        weights = np.zeros(33)
-        for idx in [11, 12, 23, 24, 25, 26, 27, 28]:
-            weights[idx] = 1.0
-    elif action == "JumpingJack":
-        weights = np.zeros(33)
-        for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
-            weights[idx] = 1.0
-    elif action == "PushUps":
-        weights = np.zeros(33)
-        for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
-            weights[idx] = 1.0
-
-    score = compute_action_standard_score(orig_norm_seq, perfect_seq, base_weight=30.0, keypoint_weights=weights)
-    print("Action Standard Score:", score)
-
-    projected_original_seq = project_with_stored_params(orig_norm_seq, transform_params)
-    projected_perfect_seq = project_with_stored_params(perfect_seq, transform_params)
-
-    projected_perfect_seq = smooth_sequence(projected_perfect_seq, window_size=5)
-
-    output_video = "result_videos/"+ action + "_result_overlay.mp4"
-    overlay_two_skeletons_on_video(projected_original_seq, projected_perfect_seq,
-                                   video_path=original_video,
-                                   output_path=output_video,
-                                   scale_orig=1.0, offset_x_orig=0, offset_y_orig=0,
-                                   scale_perfect=1.0, offset_x_perfect=0, offset_y_perfect=0, inverse=False)
-
 def parse_filename(filename):
     basename = os.path.splitext(filename)[0]
-    # 使用正则表达式：匹配一段字母后跟一段数字
     m = re.match(r"([A-Za-z]+)(\d+)", basename)
     if m:
         action = m.group(1)
@@ -278,8 +320,8 @@ def parse_filename(filename):
     else:
         return None, None
 
-def test_all_videos():
-    # action = "PushUps"  # 你可以根据实际动作修改此变量: BodyWeightSquats, JumpingJack, PushUps
+def test():
+    # action = "BodyWeightSquats", "JumpingJack", "PushUps"
     video_dir = "test_video"
     json_dir = "test_skeleton_json"
     output_dir = "result_videos"
@@ -301,6 +343,7 @@ def test_all_videos():
 
         video_path = os.path.join(video_dir, video_filename)
         json_path = os.path.join(json_dir, os.path.splitext(video_filename)[0] + ".json")
+
         if not os.path.exists(json_path):
             print(f"JSON file not found for {video_filename}")
             continue
@@ -310,7 +353,6 @@ def test_all_videos():
             print(f"Failed to load skeleton for {video_filename}")
             continue
 
-        # 获取视频总帧数及视频属性
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -318,50 +360,63 @@ def test_all_videos():
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
 
-        # 假设视频中动作匀速分布，分为 num_actions 段（每段帧数相同）
         frames_per_action = total_frames // num_actions
 
-        # 构建完美骨架，目标帧数为当前段的帧数
-        perfect_seq = build_perfect_action(standard_jsons, target_len=frames_per_action)
+        perfect_seq = build_perfect_action(standard_jsons, frames_per_action, action)
         if perfect_seq is None:
             print("Failed to build perfect action.")
             return
 
-        # 存储所有处理后的帧
         output_frames = []
-
+        total_score = 0
+        curr_score = 0
         for seg in range(num_actions):
             start_frame = seg * frames_per_action
             end_frame = (seg + 1) * frames_per_action
             original_seq = original_seq_total[start_frame:end_frame]
 
-            # 对原始骨架标准化，并保存变换参数
-            orig_norm_seq, transform_params = normalize_pose_and_store_params(original_seq)
+            orig_norm_seq, transform_params = normalize_pose_and_store_params(original_seq, action)
 
-            # 计算动作标准分数（在标准化空间下）
-            weights = None
-            if action == "BodyWeightSquats":
-                weights = np.zeros(33)
-                for idx in [11, 12, 23, 24, 25, 26, 27, 28]:
-                    weights[idx] = 1.0
-            elif action == "JumpingJack":
-                weights = np.zeros(33)
-                for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
-                    weights[idx] = 1.0
-            elif action == "PushUps":
-                weights = np.zeros(33)
-                for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
-                    weights[idx] = 1.0
-            score = compute_action_standard_score(orig_norm_seq, perfect_seq, base_weight=20.0,
-                                                  keypoint_weights=weights)
+            # point method
+            # weights = None
+            # if action == "BodyWeightSquats":
+            #     weights = np.zeros(33)
+            #     for idx in [27, 28]:
+            #         weights[idx] = 1.0
+            #     for idx in [25, 26]:
+            #         weights[idx] = 3.0
+            #     for idx in [11, 12, 23, 24]:
+            #         weights[idx] = 5.0
+            # elif action == "JumpingJack":
+            #     weights = np.zeros(33)
+            #     for idx in [13, 14, 15, 16]:
+            #         weights[idx] = 2.0
+            #     for idx in [11, 12, 23, 24]:
+            #         weights[idx] = 1.0
+            #     for idx in [25, 26, 27, 28]:
+            #         weights[idx] = 5.0
+            # elif action == "PushUps":
+            #     weights = np.zeros(33)
+            #     for idx in [13, 14]:
+            #         weights[idx] = 1.0
+            #     for idx in [23, 24]:
+            #         weights[idx] = 5.0
+            #     for idx in [11, 12, 15, 16, 25, 26, 27, 28]:
+            #         weights[idx] = 3.0
+            # score = compute_action_standard_score(orig_norm_seq, perfect_seq, base_weight=20.0,
+            #                                       keypoint_weights=weights)
+
+            score = compute_action_angle_score(original_seq, perfect_seq, action, base_weight=50.0)
             print(f"Segment {seg} Action Standard Score: {score}")
 
-            # 反归一化：将标准化的原始骨架和完美骨架恢复到原始空间
+            # Update
+            curr_score = score
+            total_score += curr_score
+
             projected_original_seq = project_with_stored_params(orig_norm_seq, transform_params)
             projected_perfect_seq = project_with_stored_params(perfect_seq, transform_params)
             projected_perfect_seq = smooth_sequence(projected_perfect_seq, window_size=5)
 
-            # 读取当前动作段对应的视频帧，并叠加骨架
             cap = cv2.VideoCapture(video_path)
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
             seg_frames = []
@@ -369,30 +424,41 @@ def test_all_videos():
                 ret, frame = cap.read()
                 if not ret:
                     break
-                # 叠加原始骨架（使用默认绘制函数，此处假设原始骨架数据为 projected_original_seq）
+
                 draw_skeleton_on_frame_custom(frame, projected_original_seq[i],
                                               width, height, scale=1.0, offset_x=0, offset_y=0,
-                                              line_color=(0, 255, 0), point_color=(255, 0, 0))
-                # 叠加完美骨架
-                draw_skeleton_on_frame_custom(frame, projected_perfect_seq[i],
-                                              width, height, scale=1.0, offset_x=0, offset_y=0,
                                               line_color=(255, 255, 255), point_color=(0, 0, 255))
-                # 可选：在帧上显示分数（例如右上角）
-                text = f"Score: {score}"
+
+                overlay_skeleton_in_corner(frame, projected_perfect_seq[i],
+                                              width, height, scale=1.3, offset_x=0, offset_y=0,
+                                              line_color=(0, 255, 0), point_color=(255, 0, 0))
+
+
                 font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 1.0
+                font_scale = 1.5
                 thickness = 2
-                (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
                 margin = 10
-                x_text = width - text_w - margin
-                y_text = margin + text_h
-                cv2.putText(frame, text, (x_text, y_text), font, font_scale, (0, 0, 255), thickness)
+                avg_score = round(total_score / (seg+1), 2)
+                texts = [
+                    f"Action: {action}",
+                    f"Count: {(seg+1)}/{num_actions}",
+                    f"Score: {curr_score}",
+                    f"Avg Score: {avg_score}"
+                ]
+
+                y0 = margin + 50
+                line_spacing = 50
+
+                for idx, text in enumerate(texts):
+                    x_text = int(width/2 - margin - 200)
+                    y_text = y0 + idx * line_spacing
+                    cv2.putText(frame, text, (x_text, y_text), font, font_scale, (0, 0, 255), thickness)
+
                 seg_frames.append(frame)
 
             cap.release()
             output_frames.extend(seg_frames)
 
-        # 将所有处理后的帧写入一个输出视频文件
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         output_video = os.path.join(output_dir, os.path.splitext(video_filename)[0] + "_result_overlay.mp4")
         out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
@@ -403,5 +469,4 @@ def test_all_videos():
 
 
 if __name__ == "__main__":
-    # test()
-    test_all_videos()
+    test()
