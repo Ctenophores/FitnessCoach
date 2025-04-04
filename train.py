@@ -32,6 +32,8 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
     criterion_rep = nn.MSELoss()
+    # criterion_rep = nn.L1Loss()
+    criterion_frame = nn.BCEWithLogitsLoss()
     
     # Get data loaders from your dataset.py
     train_loader, val_loader = get_dataloaders(data_root='split_data', batch_size=8)
@@ -45,7 +47,7 @@ def main():
         total_loss = 0.0
         total_samples = 0
         
-        for packed_input, (action_labels, rep_counts) in train_loader:
+        for packed_input, (action_labels, rep_counts, _) in train_loader:
             action_labels = action_labels.to(device)
             rep_counts = rep_counts.to(device)
             # We need to handle the PackedSequence. Let’s see how to do that:
@@ -67,13 +69,18 @@ def main():
             # shape => [B, num_classes]
             final_action_logits = action_logits
             final_rep_count_pred = rep_count_pred
+
+            frame_labels = build_frame_labels(lengths, rep_counts, device)  # shape [B, T]
             
             # If you have 1 label per sequence => labels shape [B]
             # Cross-entropy
             alpha = 3.0
+            beta = 1.0
             loss_action = criterion(final_action_logits, action_labels)
             loss_rep = criterion_rep(final_rep_count_pred, rep_counts)
-            loss = loss_action + alpha * loss_rep
+            loss_frame = criterion_frame(frame_scores, frame_labels)
+
+            loss = loss_action + alpha * loss_rep + beta * loss_frame
             
             optimizer.zero_grad()
             loss.backward()
@@ -122,7 +129,7 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
     rep_trues_all = []
 
     with torch.no_grad():
-        for packed_input, (action_labels, rep_counts) in val_loader:
+        for packed_input, (action_labels, rep_counts, filenames) in val_loader:
             action_labels = action_labels.to(device)
             rep_counts = rep_counts.to(device)
             padded, lengths = torch.nn.utils.rnn.pad_packed_sequence(packed_input, batch_first=True)
@@ -137,18 +144,27 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
                 # filenames = batch_data[2] if len(batch_data) > 2 else [f"sample{i}.json" for i in range(frame_scores.shape[0])]
 
                 for i in range(min(4, frame_scores.shape[0])):  # 最多画4张
-                    scores = frame_scores[i].detach().cpu().numpy()
+                    scores = torch.sigmoid(frame_scores[i]).detach().cpu().numpy()
                     peaks, _ = find_peaks(scores, height=0.5, distance=10)
+                    file_stem = filenames[i].replace('.json', '')
                     plt.figure(figsize=(8, 3))
                     plt.plot(scores, label="Frame Scores")
                     plt.plot(peaks, scores[peaks], "ro", label="Detected Peaks")
-                    plt.title(f"Sample {i} - Epoch {epoch}")
+
+                    T = len(scores)
+                    R = int(rep_counts[i].item())
+                    if R > 0:
+                        boundaries = np.linspace(0, T, R + 1, dtype=int)  # 分成 R 段
+                        gt_peaks = np.array([(boundaries[i] + boundaries[i+1]) // 2 for i in range(R)])
+                        plt.plot(gt_peaks, scores[gt_peaks], "g^", label="GT Peaks")
+
+                    plt.title(f"{file_stem} - Epoch {epoch}")
                     plt.xlabel("Frame")
                     plt.ylabel("Score")
                     plt.legend()
                     plt.grid(True)
                     plt.tight_layout()
-                    plt.savefig(f"frame_score_plots/frame_scores_sample{i}_epoch{epoch}.png")
+                    plt.savefig(f"frame_score_plots/{file_stem}_epoch{epoch}.png")
                     plt.close()
 
             loss_action = criterion(action_logits, action_labels)
@@ -173,7 +189,25 @@ def evaluate(model, val_loader, adj, in_features, device, criterion, criterion_r
 
     return avg_val_loss, accuracy, mae, rmse, int_acc
 
+def build_frame_labels(lengths, rep_counts, device, sigma=5.0):
+    B = len(lengths)
+    max_len = max(lengths).item()
+    frame_labels = torch.zeros(B, max_len, device=device)
 
+    for i in range(B):
+        T = lengths[i].item()
+        R = int(rep_counts[i].item())
+        if R < 1:
+            continue
+        centers = torch.linspace(0, T - 1, R)
+
+        for c in centers:
+            x = torch.arange(T, device=device)
+            frame_labels[i, :T] += torch.exp(-0.5 * ((x - c) / sigma) ** 2)
+
+        frame_labels[i, :T] /= frame_labels[i, :T].max() + 1e-8
+
+    return frame_labels
 def plot_loss(train_losses, save_path="loss_curve.png"):
     plt.clf() 
     plt.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss")
