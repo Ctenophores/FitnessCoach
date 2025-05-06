@@ -53,6 +53,7 @@ def compute_transform_params(pose, action):
             y_axis = np.array([0, 1, 0], dtype=np.float32)
         else:
             y_axis /= (np.linalg.norm(y_axis) + eps)
+
     elif action == "PushUps":
         origin = (left_wrist + right_wrist + left_ankle + right_ankle) / 4.0
         scale = np.linalg.norm(ankle_mid - shoulder_mid)
@@ -67,6 +68,7 @@ def compute_transform_params(pose, action):
         else:
             body_vector /= (np.linalg.norm(body_vector) + eps)
         y_axis = body_vector
+
     else:
         origin = hip_mid
         scale = np.linalg.norm(shoulder_mid - origin)
@@ -192,21 +194,6 @@ def draw_skeleton_on_frame_custom(frame, skeleton_33x4, width, height, scale=1.0
     for (px, py) in points_2d:
         cv2.circle(frame, (px, py), point_radius, point_color, -1)
 
-def overlay_skeleton_in_corner(frame, skeleton, width, height, region_ratio=1 / 3, scale=1.0, offset_x=0, offset_y=0, line_color=(255, 255, 255), point_color=(0, 0, 255), point_radius=4, line_thickness=2):
-    region_w = int(width * region_ratio)
-    region_h = int(height * region_ratio)
-
-    roi = np.ones((region_h, region_w, 3), dtype=np.uint8) * 255
-
-    draw_skeleton_on_frame_custom(roi, skeleton, region_w, region_h,
-                                  scale=scale, offset_x=offset_x, offset_y=offset_y,
-                                  line_color=line_color, point_color=point_color,
-                                  point_radius=point_radius, line_thickness=line_thickness)
-
-    x_start = width - region_w
-    y_start = 0
-    frame[y_start:y_start + region_h, x_start:x_start + region_w] = roi
-
 def compute_action_standard_score(original_seq, projected_seq, base_weight=10.0, keypoint_weights=None):
     diff = original_seq[:, :, :3] - projected_seq[:, :, :3]
     distances = np.linalg.norm(diff, axis=-1)
@@ -221,28 +208,26 @@ def compute_action_standard_score(original_seq, projected_seq, base_weight=10.0,
     score = max(0, 100 - base_weight * overall_weighted_avg)
     return round(score, 2)
 
-def compute_action_angle_score(original_seq, perfect_seq, action, base_weight=30.0):
+
+def compute_action_angle_score(orig_seq, perf_seq, action, base_weight):
     def compute_angle(p1, p2, p3):
         v1 = p1 - p2
         v2 = p3 - p2
         dot = np.dot(v1, v2)
         norm = np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8
         angle = np.arccos(np.clip(dot / norm, -1.0, 1.0))
-        return angle
+        angle_deg = angle * 180.0 / np.pi  # 0° - 180°
+
+        return angle_deg
 
     angle_definitions = {
         "BodyWeightSquats": [
             (23, 25, 27),
-            (24, 26, 28),
-            (12, 24, 26),
-            (11, 23, 25),
-
+            (24, 26, 28)
         ],
         "JumpingJack": [
-            (11, 13, 15),
-            (12, 14, 16),
-            (12, 24, 26),
-            (11, 23, 25),
+            (23, 24, 26),
+            (24, 23, 25),
             (14, 12, 24),
             (13, 11, 23)
         ],
@@ -250,34 +235,39 @@ def compute_action_angle_score(original_seq, perfect_seq, action, base_weight=30
             (11, 13, 15),
             (12, 14, 16),
             (12, 24, 26),
-            (11, 23, 25),
-            (14, 12, 24),
-            (13, 11, 23)
+            (11, 23, 25)
         ]
     }
+
     angle_defs = angle_definitions.get(action, [])
     if not angle_defs:
         print("No angle definitions for action:", action)
         return None
 
-    errors = []
-    for (p1, p2, p3) in angle_defs:
-        max_angle_orig = 0
-        max_angle_perfect = 0
-        T = original_seq.shape[0]
-        for i in range(T):
-            orig_pose = original_seq[i, :, :3]      # (33,3)
-            perfect_pose = perfect_seq[i, :, :3]    # (33,3)
-            angle_orig = compute_angle(orig_pose[p1], orig_pose[p2], orig_pose[p3])
-            angle_perfect = compute_angle(perfect_pose[p1], perfect_pose[p2], perfect_pose[p3])
-            if angle_orig > max_angle_orig:
-                max_angle_orig = angle_orig
-            if angle_perfect > max_angle_perfect:
-                max_angle_perfect = angle_perfect
-        errors.append(abs(max_angle_orig - max_angle_perfect))
-    overall_error = np.mean(errors)
-    score = max(0, 100 - base_weight * overall_error)
+    T = orig_seq.shape[0]
+    M = len(angle_defs)
+    errors = np.zeros((T, M), dtype=np.float32)
+
+    for idx, (p1, p2, p3) in enumerate(angle_defs):
+        v1_o = orig_seq[:, p1] - orig_seq[:, p2]
+        v2_o = orig_seq[:, p3] - orig_seq[:, p2]
+        v1_p = perf_seq[:, p1] - perf_seq[:, p2]
+        v2_p = perf_seq[:, p3] - perf_seq[:, p2]
+
+        cos_o = np.einsum('ij,ij->i', v1_o, v2_o) / (
+                np.linalg.norm(v1_o, axis=1) * np.linalg.norm(v2_o, axis=1) + 1e-8)
+        cos_p = np.einsum('ij,ij->i', v1_p, v2_p) / (
+                np.linalg.norm(v1_p, axis=1) * np.linalg.norm(v2_p, axis=1) + 1e-8)
+
+        ang_o = np.arccos(np.clip(cos_o, -1, 1)) * 180 / np.pi
+        ang_p = np.arccos(np.clip(cos_p, -1, 1)) * 180 / np.pi
+
+        errors[:, idx] = np.abs(ang_o - ang_p)
+
+    overall_error = errors.mean()
+    score = max(0, 100 - base_weight * (overall_error / 180.0))
     return round(score, 2)
+
 
 def smooth_sequence(seq, window_size=5):
     T = seq.shape[0]
@@ -320,11 +310,135 @@ def parse_filename(filename):
     else:
         return None, None
 
+def beautify_frame(frame, action, count, total, score, avg_score, perfect_skeleton):
+    H, W = frame.shape[:2]
+    PANEL_W = W // 2               # 右侧面板宽度
+    canvas = np.ones((H, W + PANEL_W, 3), dtype=np.uint8) * 255  # 纯白背景
+    # 1) 把原帧拷贝到左侧
+    canvas[:, :W] = frame
+
+    # 一些公用位置参数
+    pad = 20
+    FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+    # 2) 顶部动作按钮
+    actions = ["BodyWeightSquats", "JumpingJack", "PushUps"]
+    btn_w = (PANEL_W - pad * (len(actions) + 1)) // len(actions)
+    btn_h = 50
+    for i, name in enumerate(actions):
+        x0 = W + pad + i * (btn_w + pad)
+        y0 = pad
+        x1, y1 = x0 + btn_w, y0 + btn_h
+        for i, name in enumerate(actions):
+            x0 = W + pad + i * (btn_w + pad)
+            y0 = pad
+            x1, y1 = x0 + btn_w, y0 + btn_h
+
+            if name == action:
+                # 1) 填充背景色
+                cv2.rectangle(canvas, (x0, y0), (x1, y1), (0, 200, 0), thickness=-1, lineType=cv2.LINE_AA)
+                # 2) 再画个深一点的边框
+                cv2.rectangle(canvas, (x0, y0), (x1, y1), (0, 150, 0), thickness=3, lineType=cv2.LINE_AA)
+                text_color = (255, 255, 255)
+            else:
+                cv2.rectangle(canvas, (x0, y0), (x1, y1), (0, 0, 0), thickness=2, lineType=cv2.LINE_AA)
+                text_color = (0, 0, 0)
+
+            # 文本也改成选中白字，未选黑字
+            if name == "BodyWeightSquats":
+                name = "Squats"
+            cv2.putText(canvas, name, (x0 + 10, y0 + btn_h - 15),
+                        FONT, 0.7, text_color, 2, cv2.LINE_AA)
+
+    # 3) 中间圆形计数器
+    #    画一个圆环，填充当前 fraction
+    radius = min(int(PANEL_W/4), int(H/7))
+    thickness = int(radius/5)
+    center_x = W + PANEL_W // 2
+    center_y = y0 + btn_h + radius + 50
+    # 底部圆环
+    cv2.circle(canvas, (center_x, center_y), radius, (200,200,200), thickness, cv2.LINE_AA)
+    # 填充扇形
+    fraction = count / total
+    end_angle = int(360 * fraction)
+    cv2.ellipse(canvas,
+                (center_x, center_y),
+                (radius, radius),
+                0,           # 旋转角度
+                -90,         # 起始角度：从顶部开始
+                -90 + end_angle,
+                (0,200,0),
+                thickness, cv2.LINE_AA)
+    # 计数文字
+    count_text = f"{count}/{total}"
+    # 用 fontScale=1.0, thickness=2 测量文字高度
+    (text_w, text_h), baseline = cv2.getTextSize(count_text, FONT, fontScale=1.0, thickness=2)
+    # 希望文字高度占 radius 的比例（例如 60%）
+    target_h = radius * 0.4
+    fontScale_count = target_h / text_h
+    thickness_count = max(int(fontScale_count * 2), 1)
+    # 缩放后的尺寸
+    text_w_scaled = int(text_w * fontScale_count)
+    text_h_scaled = int(text_h * fontScale_count)
+    # 居中坐标
+    org_count = (center_x - text_w_scaled // 2,
+                 center_y + text_h_scaled // 2)
+    cv2.putText(canvas,
+                count_text,
+                org_count,
+                FONT,
+                fontScale_count,
+                (0, 200, 0),
+                thickness_count,
+                cv2.LINE_AA)
+
+    # 4) 分数与提示
+    txt_y = center_y + radius + pad*2
+    cv2.putText(canvas, f"Score: {score:.1f}",
+                (W+pad, txt_y), FONT, 0.8, (0,0,0), 2, cv2.LINE_AA)
+    cv2.putText(canvas, f"Avg:   {avg_score:.1f}",
+                (W+pad, txt_y+30), FONT, 0.8, (0,0,0), 2, cv2.LINE_AA)
+
+    # 如果接近满分，可以写“PERFECT!”
+    if score > 90:
+        cv2.putText(canvas, "PERFECT!",
+                    (W+pad, txt_y+80), FONT, 1.2, (0,180,0), 3, cv2.LINE_AA)
+    elif score > 85:
+        cv2.putText(canvas, "GOOD",
+                    (W+pad, txt_y+80), FONT, 1.2, (0,255,255), 3, cv2.LINE_AA)
+    elif score > 75:
+        cv2.putText(canvas, "NOT BAD",
+                    (W+pad, txt_y+80), FONT, 1.2, (0,165,255), 3, cv2.LINE_AA)
+    else:
+        cv2.putText(canvas, "WRONG!",
+                    (W+pad, txt_y+80), FONT, 1.2, (0,0,255), 3, cv2.LINE_AA)
+
+    # 5) 右下小窗口：完美骨架示意
+    win_w, win_h = PANEL_W - pad*2, H//2 - pad*2
+    x0, y0 = W + pad, H - pad - win_h
+    # 背景与边框
+    # cv2.rectangle(canvas, (x0,y0), (x0+win_w, y0+win_h),
+    #               (0,0,0), thickness=2, lineType=cv2.LINE_AA)
+
+    roi = canvas[y0:y0+win_h, x0:x0+win_w]
+    draw_skeleton_on_frame_custom(
+        roi,
+        perfect_skeleton,
+        width=win_w, height=win_h*0.8,
+        scale=1.0, offset_x=0, offset_y=0,
+        line_color=(0,200,0), point_color=(255,0,0),
+        inverse=False, point_radius=3, line_thickness=2
+    )
+
+    return canvas
+
 def test():
     # action = "BodyWeightSquats", "JumpingJack", "PushUps"
     video_dir = "test_video"
     json_dir = "test_skeleton_json"
     output_dir = "result_videos"
+
+    # video_to_skeleton(video_dir=video_dir, output_dir=json_dir, output_video_dir='test_skeleton')
 
     for video_filename in os.listdir(video_dir):
         if not (video_filename.lower().endswith(".mp4") or video_filename.lower().endswith(".avi")):
@@ -369,7 +483,7 @@ def test():
 
         output_frames = []
         total_score = 0
-        curr_score = 0
+        first_transform_params = None
         for seg in range(num_actions):
             start_frame = seg * frames_per_action
             end_frame = (seg + 1) * frames_per_action
@@ -377,44 +491,17 @@ def test():
 
             orig_norm_seq, transform_params = normalize_pose_and_store_params(original_seq, action)
 
-            # point method
-            # weights = None
-            # if action == "BodyWeightSquats":
-            #     weights = np.zeros(33)
-            #     for idx in [27, 28]:
-            #         weights[idx] = 1.0
-            #     for idx in [25, 26]:
-            #         weights[idx] = 3.0
-            #     for idx in [11, 12, 23, 24]:
-            #         weights[idx] = 5.0
-            # elif action == "JumpingJack":
-            #     weights = np.zeros(33)
-            #     for idx in [13, 14, 15, 16]:
-            #         weights[idx] = 2.0
-            #     for idx in [11, 12, 23, 24]:
-            #         weights[idx] = 1.0
-            #     for idx in [25, 26, 27, 28]:
-            #         weights[idx] = 5.0
-            # elif action == "PushUps":
-            #     weights = np.zeros(33)
-            #     for idx in [13, 14]:
-            #         weights[idx] = 1.0
-            #     for idx in [23, 24]:
-            #         weights[idx] = 5.0
-            #     for idx in [11, 12, 15, 16, 25, 26, 27, 28]:
-            #         weights[idx] = 3.0
-            # score = compute_action_standard_score(orig_norm_seq, perfect_seq, base_weight=20.0,
-            #                                       keypoint_weights=weights)
+            if seg == 0:
+                first_transform_params = transform_params
 
             score = compute_action_angle_score(original_seq, perfect_seq, action, base_weight=50.0)
-            print(f"Segment {seg} Action Standard Score: {score}")
 
-            # Update
-            curr_score = score
-            total_score += curr_score
+            total_score += score
 
             projected_original_seq = project_with_stored_params(orig_norm_seq, transform_params)
-            projected_perfect_seq = project_with_stored_params(perfect_seq, transform_params)
+            projected_original_seq = smooth_sequence(projected_original_seq, window_size=5)
+
+            projected_perfect_seq = project_with_stored_params(perfect_seq, first_transform_params)
             projected_perfect_seq = smooth_sequence(projected_perfect_seq, window_size=5)
 
             cap = cv2.VideoCapture(video_path)
@@ -425,46 +512,42 @@ def test():
                 if not ret:
                     break
 
-                draw_skeleton_on_frame_custom(frame, projected_original_seq[i],
-                                              width, height, scale=1.0, offset_x=0, offset_y=0,
-                                              line_color=(255, 255, 255), point_color=(0, 0, 255))
+                draw_skeleton_on_frame_custom(
+                    frame,
+                    projected_original_seq[i],
+                    width, height,
+                    scale=1.0, offset_x=0, offset_y=0,
+                    line_color=(255, 255, 255), point_color=(0, 0, 255)
+                )
 
-                overlay_skeleton_in_corner(frame, projected_perfect_seq[i],
-                                              width, height, scale=1.3, offset_x=0, offset_y=0,
-                                              line_color=(0, 255, 0), point_color=(255, 0, 0))
-
-
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 1.5
-                thickness = 2
-                margin = 10
-                avg_score = round(total_score / (seg+1), 2)
-                texts = [
-                    f"Action: {action}",
-                    f"Count: {(seg+1)}/{num_actions}",
-                    f"Score: {curr_score}",
-                    f"Avg Score: {avg_score}"
-                ]
-
-                y0 = margin + 50
-                line_spacing = 50
-
-                for idx, text in enumerate(texts):
-                    x_text = int(width/2 - margin - 200)
-                    y_text = y0 + idx * line_spacing
-                    cv2.putText(frame, text, (x_text, y_text), font, font_scale, (0, 0, 255), thickness)
-
-                seg_frames.append(frame)
+                beautified = beautify_frame(
+                    frame,
+                    action=action,
+                    count=seg + 1,
+                    total=num_actions,
+                    score=score,
+                    avg_score=round(total_score / (seg + 1), 2),
+                    perfect_skeleton=projected_perfect_seq[i]
+                )
+                seg_frames.append(beautified)
 
             cap.release()
             output_frames.extend(seg_frames)
 
+        panel_w = width // 2
+
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        output_video = os.path.join(output_dir, os.path.splitext(video_filename)[0] + "_result_overlay.mp4")
-        out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
+        output_video = os.path.join(output_dir,
+                                    os.path.splitext(video_filename)[0] + "_result_overlay.mp4")
+        out = cv2.VideoWriter(output_video, fourcc, fps, (width + panel_w, height))
+        if not out.isOpened():
+            print("ERROR: Cannot open VideoWriter with size", (width + panel_w, height))
+            return
+
         for frame in output_frames:
             out.write(frame)
         out.release()
+
         print(f"Combined overlay video saved to: {output_video}")
 
 
