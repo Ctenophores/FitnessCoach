@@ -27,16 +27,22 @@ This repository hosts the implementation of our semester project—a real-time A
    * **Spatial GCN**: Two-layer graph convolution on 33‑joint skeleton graph to encode structural context.
    * **Temporal BiLSTM**: Bidirectional LSTM processes the sequence of spatial embeddings to capture cyclic motion patterns.
 
+<img src="images/model_structure.png" alt="model structure" width="450px" />  
+
 3. **Perfect Skeleton Comparison**
 
    * Build per-exercise average skeleton from trimmed standard videos.
    * During inference, segment each rep via phase-peak detection.
    * Score by weighted 3D coordinate difference + joint‑angle structural error.
 
+<img src="images/score.png" alt="score system" width="450px" />  
+
 4. **Training & Loss**
 
    * **Loss** = CE$_	ext{class}$ + α·MSE$_	ext{count}$ + β·BCE$_	ext{phase}$.
    * Best results with α=3, β=1: Val Loss=0.98, Action Acc=98.55%, Rep MAE=0.27, RMSE=0.52, Int-Acc=85.51%.
+
+<img src="images/loss.png" alt="Loss plot" width="450px" />  
 
 ## Repository Structure
 
@@ -88,7 +94,10 @@ pip install -r requirements.txt
    python src/infer.py --skeleton data/skeleton.json --out results/
    ```
 
-## Results
+## Results Video
+<img src="images/PushUps5_result_overlay.gif" alt="sample result" style="max-width: 100%; height: auto;" />
+
+## Results Analyze
 
 | Metric                         | Value  |
 | ------------------------------ | ------ |
