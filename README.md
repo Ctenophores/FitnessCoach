@@ -73,8 +73,8 @@ This repository hosts the implementation of our semester project—a real-time A
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/fitness-coach.git
-cd fitness-coach
+git clone https://github.com/Ctenophores/FitnessCoach.git
+cd FitnessCoach
 env/bin/activate  # or `source env/bin/activate`
 pip install -r requirements.txt
 ```
