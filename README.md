@@ -4,7 +4,7 @@
 
 ## Overview
 
-This repository hosts the implementation of our semester project—a real-time AI fitness coach that automatically classifies exercises, counts repetitions, and evaluates movement quality from video input. By combining graph convolutional spatial modeling with bidirectional temporal processing and a “perfect skeleton” reference, users receive instant, frame-by-frame corrective feedback to improve their form and reduce injury risk.
+This repository implements a video-based fitness analysis system that classifies exercises, counts repetitions, detects movement phases, and evaluates posture quality from uploaded workout videos. The system extracts 33-joint 3D skeleton sequences with MediaPipe, models spatial joint relationships with a GCN, captures temporal motion patterns with a BiLSTM, and compares user motion against a reference “perfect skeleton” for posture scoring.
 
 ## Key Features
 
