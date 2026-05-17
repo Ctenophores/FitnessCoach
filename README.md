@@ -1,4 +1,4 @@
-# AI-Driven Fitness Coach: Real-Time Posture Correction & Personalized Training
+# AI-Driven Fitness Coach: Video-Based Exercise Analysis and Posture Scoring
 
 **Authors:** Sibei Zhou, Xiaohe Hu, Yihe Liu
 
@@ -84,17 +84,17 @@ pip install -r requirements.txt
 1. **Preprocess Video**
 
    ```bash
-   python src/preprocess.py --video path/to/video.mp4 --out data/skeleton.json
+   python preprocess.py --video path/to/video.mp4 --out data/skeleton.json
    ```
 2. **Train Model**
 
    ```bash
-   python src/train.py --config configs/train.yaml
+   python train.py --config configs/train.yaml
    ```
 3. **Run Inference & Scoring**
 
    ```bash
-   python src/infer.py --skeleton data/skeleton.json --out results/
+   python infer.py --skeleton data/skeleton.json --out results/
    ```
 
 ## Results Video
